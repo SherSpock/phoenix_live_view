@@ -1203,8 +1203,8 @@ export class View {
   }
 
   performPatch(patch){
-    let phxChildrenAdded = false
     let destroyedCIDs = []
+    let phxChildrenAdded = false
     let updatedHookIds = new Set()
 
     patch.after("added", el => {
@@ -1240,7 +1240,9 @@ export class View {
     })
     patch.perform()
 
-    if(phxChildrenAdded){ this.joinNewChildren() }
+    if(phxChildrenAdded){
+      this.joinNewChildren()
+    }
     this.maybePushComponentsDestroyed(destroyedCIDs)
   }
 
