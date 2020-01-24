@@ -1113,6 +1113,7 @@ export class View {
     this.pendingDiffs = []
     this.href = href
     this.joinCount = 0
+    this.joinPending = true
     this.viewHooks = {}
     this.channel = this.liveSocket.channel(`lv:${this.id}`, () => {
       return {
@@ -1186,28 +1187,60 @@ export class View {
     this.liveSocket.log(this, kind, msgCallback)
   }
 
-  onJoin({rendered, live_redirect}){
+  onJoin(resp){
+    let {rendered, live_redirect} = resp
     this.log("join", () => ["", JSON.stringify(rendered)])
     if(rendered.title){ DOM.putTitle(rendered.title) }
     Browser.dropLocal(this.name(), CONSECUTIVE_RELOADS)
     this.rendered = rendered
-    this.hideLoader()
-    let patch = new DOMPatch(this, this.el, this.id, Rendered.toString(this.rendered))
-    this.performPatch(patch, "join")
+    let html = Rendered.toString(this.rendered)
+
+    let template = document.createElement("template")
+    template.innerHTML = html
+    let phxChange = this.binding("change")
+    let forms =
+      DOM.all(this.el, `form[${phxChange}], form[${this.binding("submit")}]`)
+         .filter(form => this.ownsElement(form))
+         .filter(form => template.content.querySelector(`form[${phxChange}="${form.getAttribute(phxChange)}"]`))
+
+    if(forms.length > 0 && this.joinCount > 1){
+      forms.forEach((form, i) => {
+        this.liveSocket.withinOwners(form, (view, targetCtx) => {
+          let input = form.elements[0]
+          view.pushInput(input, targetCtx, form.getAttribute(phxChange), {target: input}, resp => {
+            if(i === forms.length - 1){
+              this.onJoinComplete(resp, html)
+            }
+          })
+        })
+      })
+    } else {
+      this.onJoinComplete(resp, html)
+    }
+  }
+
+  onJoinComplete({live_redirect}, html){
+    console.log("complete", this.joinPending)
+    this.joinPending = false
+
+    let patch = new DOMPatch(this, this.el, this.id, html)
+    this.performPatch(patch)
     this.joinNewChildren()
     DOM.all(this.el, `[${this.binding(PHX_HOOK)}]`, hookEl => {
       let hook = this.addHook(hookEl)
       if(hook){ hook.__trigger__("mounted") }
     })
+
+    this.applyPendingUpdates()
+
     if(live_redirect){
       let {kind, to} = live_redirect
       Browser.pushState(kind, {}, to)
     }
+    this.hideLoader()
   }
 
-  performPatch(patch, kind){
-    let isJoinPatch = kind === "join"
-    let foundRecoveredInputs = false
+  performPatch(patch){
     let phxChildrenAdded = false
     let destroyedCIDs = []
     let updatedHookIds = new Set()
@@ -1224,9 +1257,6 @@ export class View {
       if(hook && !fromEl.isEqualNode(toEl)){
         updatedHookIds.add(fromEl.id)
         hook.__trigger__("beforeUpdate")
-      }
-      if(isJoinPatch && DOM.recoverInput(fromEl, toEl)){
-        foundRecoveredInputs = true
       }
     })
 
@@ -1249,7 +1279,6 @@ export class View {
     patch.perform()
 
     if(phxChildrenAdded){ this.joinNewChildren() }
-    if(isJoinPatch && foundRecoveredInputs){ this.triggerFormRecovery() }
     this.maybePushComponentsDestroyed(destroyedCIDs)
   }
 
@@ -1262,20 +1291,10 @@ export class View {
     })
   }
 
-  triggerFormRecovery(){
-    let firstInputs = `form[${this.binding(PHX_CHANGE)}], form[${this.binding("submit")}]`
-    DOM.all(this.el, firstInputs, form => {
-      let input = form.elements[0]
-      if(this.ownsElement(input)){
-        DOM.dispatchEvent(input, "input", {force: true})
-      }
-    })
-  }
-
   update(diff, cid){
     if(isEmpty(diff)){ return }
     if(diff.title){ DOM.putTitle(diff.title) }
-    if(this.liveSocket.hasPendingLink()){ return this.pendingDiffs.push({diff, cid}) }
+    if(this.joinPending || this.liveSocket.hasPendingLink()){ return this.pendingDiffs.push({diff, cid}) }
 
     this.log("update", () => ["", JSON.stringify(diff)])
     this.rendered = Rendered.mergeDiff(this.rendered, diff)
@@ -1355,6 +1374,7 @@ export class View {
       .receive("ok", data => {
         if(this.joinCount === 0){ callback && callback(this) }
         this.joinCount++
+        this.joinPending = true
         this.onJoin(data)
       })
       .receive("error", resp => this.onJoinError(resp))
@@ -1464,14 +1484,14 @@ export class View {
     })
   }
 
-  pushInput(inputEl, targetCtx, phxEvent, e){
+  pushInput(inputEl, targetCtx, phxEvent, e, callback){
     DOM.dispatchEvent(inputEl.form, PHX_CHANGE, {triggeredBy: inputEl})
     this.pushWithReply("event", {
       type: "form",
       event: phxEvent,
       value: serializeForm(inputEl.form, {_target: e.target.name}),
       cid: this.targetComponentID(inputEl.form, targetCtx)
-    })
+    }, callback)
   }
 
   pushFormSubmit(formEl, targetCtx, phxEvent, onReply){
