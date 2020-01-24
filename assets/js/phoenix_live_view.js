@@ -628,13 +628,15 @@ export class LiveSocket {
 
     for(let type of ["change", "input"]){
       this.on(type, e => {
+        let force = (e.detail && e.detail["force"]) || false
         let input = e.target
         let phxEvent = input.form && input.form.getAttribute(this.binding("change"))
         if(!phxEvent){ return }
 
         let value = JSON.stringify((new FormData(input.form)).getAll(input.name))
-        if(this.prevInput === input && this.prevValue === value){ return }
+        if(this.prevInput === input && this.prevValue === value && !force){ return }
         if(input.type === "number" && input.validity && input.validity.badInput){ return }
+
 
         this.prevInput = input
         this.prevValue = value
@@ -904,6 +906,30 @@ export let DOM = {
     }
   },
 
+  recoverInput(fromEl, toEl){
+    let isInput = (toEl instanceof HTMLInputElement) || (toEl instanceof HTMLTextAreaElement)
+    let type = isInput && toEl.type.toLowerCase()
+    if(isInput && toEl.name === "_csrf_token"){ return false }
+
+    // textual inputs
+    if(isInput && DOM.isTextualInput(toEl) && toEl.value !== fromEl.value){
+      toEl.value = fromEl.value
+      return true
+    }
+    // selects
+    else if(toEl instanceof HTMLSelectElement && toEl.value !== fromEl.value){
+      toEl.value = fromEl.value
+      return true
+    }
+    // checkboxes
+    else if(isInput && type === "checkbox" && toEl.checked !== fromEl.checked){
+      toEl.checked = fromEl.checked
+      return true
+    } else {
+      return false
+    }
+  },
+
   restoreFocus(focused, selectionStart, selectionEnd){
     if(!DOM.isTextualInput(focused)){ return }
     if(focused.value === "" || focused.readOnly){ focused.blur()}
@@ -1086,7 +1112,7 @@ export class View {
     this.loaderTimer = null
     this.pendingDiffs = []
     this.href = href
-    this.joinedOnce = false
+    this.joinCount = 0
     this.viewHooks = {}
     this.channel = this.liveSocket.channel(`lv:${this.id}`, () => {
       return {
@@ -1167,7 +1193,7 @@ export class View {
     this.rendered = rendered
     this.hideLoader()
     let patch = new DOMPatch(this, this.el, this.id, Rendered.toString(this.rendered))
-    this.performPatch(patch)
+    this.performPatch(patch, "join")
     this.joinNewChildren()
     DOM.all(this.el, `[${this.binding(PHX_HOOK)}]`, hookEl => {
       let hook = this.addHook(hookEl)
@@ -1179,9 +1205,11 @@ export class View {
     }
   }
 
-  performPatch(patch){
-    let destroyedCIDs = []
+  performPatch(patch, kind){
+    let isJoinPatch = kind === "join"
+    let foundRecoveredInputs = false
     let phxChildrenAdded = false
+    let destroyedCIDs = []
     let updatedHookIds = new Set()
 
     patch.after("added", el => {
@@ -1196,6 +1224,9 @@ export class View {
       if(hook && !fromEl.isEqualNode(toEl)){
         updatedHookIds.add(fromEl.id)
         hook.__trigger__("beforeUpdate")
+      }
+      if(isJoinPatch && DOM.recoverInput(fromEl, toEl)){
+        foundRecoveredInputs = true
       }
     })
 
@@ -1217,9 +1248,8 @@ export class View {
     })
     patch.perform()
 
-    if(phxChildrenAdded){
-      this.joinNewChildren()
-    }
+    if(phxChildrenAdded){ this.joinNewChildren() }
+    if(isJoinPatch && foundRecoveredInputs){ this.triggerFormRecovery() }
     this.maybePushComponentsDestroyed(destroyedCIDs)
   }
 
@@ -1228,6 +1258,16 @@ export class View {
       let child = this.liveSocket.getViewByEl(el)
       if(!child){
         this.liveSocket.joinView(el, this)
+      }
+    })
+  }
+
+  triggerFormRecovery(){
+    let firstInputs = `form[${this.binding(PHX_CHANGE)}], form[${this.binding("submit")}]`
+    DOM.all(this.el, firstInputs, form => {
+      let input = form.elements[0]
+      if(this.ownsElement(input)){
+        DOM.dispatchEvent(input, "input", {force: true})
       }
     })
   }
@@ -1244,7 +1284,7 @@ export class View {
       Rendered.toString(this.rendered)
 
     let patch = new DOMPatch(this, this.el, this.id, html, cid)
-    this.performPatch(patch)
+    this.performPatch(patch, "update")
   }
 
   getHook(el){ return this.viewHooks[ViewHook.elementID(el)] }
@@ -1313,8 +1353,8 @@ export class View {
     }
     this.channel.join()
       .receive("ok", data => {
-        if(!this.joinedOnce){ callback && callback(this) }
-        this.joinedOnce = true
+        if(this.joinCount === 0){ callback && callback(this) }
+        this.joinCount++
         this.onJoin(data)
       })
       .receive("error", resp => this.onJoinError(resp))
