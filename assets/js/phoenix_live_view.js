@@ -1265,7 +1265,7 @@ export class View {
       Rendered.toString(this.rendered)
 
     let patch = new DOMPatch(this, this.el, this.id, html, cid)
-    this.performPatch(patch, "update")
+    this.performPatch(patch)
   }
 
   getHook(el){ return this.viewHooks[ViewHook.elementID(el)] }
@@ -1354,7 +1354,7 @@ export class View {
   }
 
   onError(reason){
-    if(this.joinPending){ this.joinCount = 0 }
+    if(this.joinPending){ return this.liveSocket.reloadWithJitter(this) }
     this.log("error", () => ["view crashed", reason])
     this.liveSocket.onViewError(this)
     document.activeElement.blur()
